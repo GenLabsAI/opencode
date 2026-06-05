@@ -58,6 +58,27 @@ export function DialogModel(props: { providerID?: string }) {
       "Recent",
     )
 
+    const flagshipOptions = !props.providerID
+      ? sync.data.provider.flatMap((provider) => {
+          const model = provider.id === "ollama" ? provider.models.moonshine : undefined
+          if (!model || model.status === "deprecated") return []
+          return [
+            {
+              value: { providerID: provider.id, modelID: model.id },
+              title: model.name ?? "Moonshine",
+              releaseDate: model.release_date,
+              description: provider.name,
+              category: "Flagship",
+              disabled: false,
+              footer: "Local",
+              onSelect() {
+                onSelect(provider.id, model.id)
+              },
+            },
+          ]
+        })
+      : []
+
     const providerOptions = pipe(
       sync.data.provider,
       sortBy(
@@ -85,6 +106,7 @@ export function DialogModel(props: { providerID?: string }) {
             },
           })),
           filter((x) => {
+            if (x.value.providerID === "ollama" && x.value.modelID === "moonshine" && !props.providerID) return false
             if (!showSections) return true
             if (favorites.some((item) => item.providerID === x.value.providerID && item.modelID === x.value.modelID))
               return false
@@ -110,12 +132,13 @@ export function DialogModel(props: { providerID?: string }) {
 
     if (needle) {
       return [
+        ...fuzzysort.go(needle, flagshipOptions, { keys: ["title", "category", "description"] }).map((x) => x.obj),
         ...fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
         ...fuzzysort.go(needle, popularProviders, { keys: ["title"] }).map((x) => x.obj),
       ]
     }
 
-    return [...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
+    return [...flagshipOptions, ...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
   })
 
   const provider = createMemo(() =>
