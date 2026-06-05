@@ -1,0 +1,96 @@
+name: moonshine-release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+concurrency: moonshine-release
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Moonshine branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: moonshine-edition
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find latest upstream opencode release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json=$(gh release view --repo anomalyco/opencode --json tagName,targetCommitish,isPrerelease,isDraft)
+          tag=$(jq -r '.tagName' <<< "$release_json")
+          sha=$(git ls-remote https://github.com/anomalyco/opencode.git "refs/tags/$tag^{}" | awk '{print $1}')
+          if [ -z "$sha" ]; then
+            sha=$(git ls-remote https://github.com/anomalyco/opencode.git "refs/tags/$tag" | awk '{print $1}')
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Stop if Moonshine release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.upstream.outputs.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Moonshine release ${{ steps.upstream.outputs.tag }} already exists."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream release commit
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch upstream "${{ steps.upstream.outputs.sha }}"
+          git merge --no-edit FETCH_HEAD
+          git push origin HEAD:moonshine-edition
+
+      - name: Setup Bun
+        if: steps.existing.outputs.exists != 'true'
+        uses: ./.github/actions/setup-bun
+
+      - name: Create Moonshine release
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes_file="$RUNNER_TEMP/moonshine-release-notes.md"
+          cat > "$notes_file" <<EOF
+Moonshine Edition ${{ steps.upstream.outputs.version }}
+
+Synced from anomalyco/opencode ${{ steps.upstream.outputs.tag }} (${{ steps.upstream.outputs.sha }}).
+EOF
+          gh release create "${{ steps.upstream.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --target moonshine-edition \
+            --title "Moonshine ${{ steps.upstream.outputs.version }}" \
+            --notes-file "$notes_file"
+
+      - name: Build CLI artifacts
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          OPENCODE_VERSION: ${{ steps.upstream.outputs.version }}
+          OPENCODE_RELEASE: "1"
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./packages/opencode/script/build.ts
