@@ -105,6 +105,58 @@ type BundledSDK = {
   responses?: (modelId: string) => LanguageModelV3
 }
 
+let moonshineOllamaReady: Promise<void> | undefined
+
+function preloadMoonshineOllama() {
+  moonshineOllamaReady ??= (async () => {
+    // Check if Ollama is running. We do not start `serve` here to save resources.
+    const ping = await fetch("http://localhost:11434/api/tags").catch(() => undefined)
+    if (!ping?.ok) return // Only pull if daemon is already running in background.
+
+    const data = (await ping.json()) as { models?: Array<{ name?: string; model?: string }> }
+    if (data.models?.some((model) => model.name === "qwen3.5:0.8b" || model.model === "qwen3.5:0.8b")) return
+
+    const pull = Bun.spawn(["ollama", "pull", "qwen3.5:0.8b"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    await pull.exited
+  })()
+}
+
+async function ensureMoonshineOllama() {
+  // Wait for any background preload pull to finish
+  await moonshineOllamaReady
+
+  const ping = await fetch("http://localhost:11434/api/tags").catch(() => undefined)
+  if (!ping?.ok) {
+    const server = Bun.spawn(["ollama", "serve"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    server.unref()
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch("http://localhost:11434/api/tags").catch(() => undefined)
+      if (res?.ok) break
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+  }
+
+  const tags = await fetch("http://localhost:11434/api/tags")
+  if (!tags.ok) throw new Error("Ollama is not running. Install Ollama from https://ollama.com/download and try again.")
+  const data = (await tags.json()) as { models?: Array<{ name?: string; model?: string }> }
+  if (data.models?.some((model) => model.name === "qwen3.5:0.8b" || model.model === "qwen3.5:0.8b")) return
+
+  const pull = Bun.spawn(["ollama", "pull", "qwen3.5:0.8b"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  if ((await pull.exited) !== 0) throw new Error("Failed to pull qwen3.5:0.8b with Ollama")
+}
+
 const BUNDLED_PROVIDERS: Record<string, () => Promise<(opts: any) => BundledSDK>> = {
   "@ai-sdk/amazon-bedrock": () => import("@ai-sdk/amazon-bedrock").then((m) => m.createAmazonBedrock),
   "@ai-sdk/amazon-bedrock/mantle": () => import("@ai-sdk/amazon-bedrock/mantle").then((m) => m.createBedrockMantle),
@@ -1306,6 +1358,9 @@ export const layer = Layer.effect(
         const database = mapValues(catalog, toPublicInfo)
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
+        const moonshineProviderID = ProviderV2.ID.make("ollama")
+        const moonshineModelID = ModelV2.ID.make("moonshine")
+        const moonshineApiID = "qwen3.5:0.8b"
         const languages = new Map<string, LanguageModelV3>()
         const modelLoaders: {
           [providerID: string]: CustomModelLoader
@@ -1346,6 +1401,43 @@ export const layer = Layer.effect(
         const configProviders = Object.entries(cfg.provider ?? {})
         const disabled = new Set(cfg.disabled_providers ?? [])
         const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
+        database[moonshineProviderID] = mergeDeep(database[moonshineProviderID] ?? {}, {
+          id: moonshineProviderID,
+          source: "custom",
+          name: "Ollama",
+          env: [],
+          options: {},
+          models: {
+            ...(database[moonshineProviderID]?.models ?? {}),
+            [moonshineModelID]: {
+              id: moonshineModelID,
+              providerID: moonshineProviderID,
+              api: {
+                id: moonshineApiID,
+                url: "http://localhost:11434/v1",
+                npm: "@ai-sdk/openai-compatible",
+              },
+              name: "Moonshine",
+              family: "qwen3.5",
+              capabilities: {
+                temperature: true,
+                reasoning: false,
+                attachment: false,
+                toolcall: true,
+                input: { text: true, audio: false, image: false, video: false, pdf: false },
+                output: { text: true, audio: false, image: false, video: false, pdf: false },
+                interleaved: false,
+              },
+              cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+              limit: { context: 32_768, output: 8_192 },
+              status: "active",
+              options: { apiKey: "ollama" },
+              headers: {},
+              release_date: "2026-06-05",
+              variants: {},
+            },
+          },
+        } satisfies Partial<Info>) as Info
 
         function isProviderAllowed(providerID: ProviderV2.ID): boolean {
           if (enabled && !enabled.has(providerID)) return false
@@ -1520,6 +1612,9 @@ export const layer = Layer.effect(
           const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
           mergeProvider(providerID, patch)
         }
+
+        mergeProvider(moonshineProviderID, { source: "custom", options: { apiKey: "ollama" } })
+        preloadMoonshineOllama()
 
         for (const [id, fn] of Object.entries(custom(dep))) {
           const providerID = ProviderV2.ID.make(id)
@@ -1829,6 +1924,7 @@ export const layer = Layer.effect(
       const provider = s.providers[model.providerID]
       return yield* EffectPromise.refineRejection(
         async () => {
+          if (model.providerID === "ollama" && model.id === "moonshine") await ensureMoonshineOllama()
           const sdk = await resolveSDK(model, s, envs)
           const language = s.modelLoaders[model.providerID]
             ? await s.modelLoaders[model.providerID](
