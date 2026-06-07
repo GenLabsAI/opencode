@@ -17,7 +17,7 @@ jobs:
       - name: Checkout Moonshine branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: moonshine-edition
+          ref: dev
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -60,7 +60,7 @@ jobs:
           git remote add upstream https://github.com/anomalyco/opencode.git
           git fetch upstream "${{ steps.upstream.outputs.sha }}"
           git merge --no-edit FETCH_HEAD
-          git push origin HEAD:moonshine-edition
+          git push origin HEAD:dev
 
       - name: Setup Bun
         if: steps.existing.outputs.exists != 'true'
@@ -80,7 +80,7 @@ Synced from anomalyco/opencode ${{ steps.upstream.outputs.tag }} (${{ steps.upst
 EOF
           gh release create "${{ steps.upstream.outputs.tag }}" \
             --repo "${{ github.repository }}" \
-            --target moonshine-edition \
+            --target dev \
             --title "Moonshine ${{ steps.upstream.outputs.version }}" \
             --notes-file "$notes_file"
 
